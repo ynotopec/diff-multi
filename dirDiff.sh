@@ -33,7 +33,7 @@ done \
 triggerValue=$(($(ls -1d /tmp/analyse$$/files/* |wc -l) / 2))
 
 # keep vars words
-awk 'NR == FNR {count[$0]++; next}; count[$0] <= '"${triggerValue}" /tmp/analyse$$/statWords /tmp/analyse$$/statWords |sort -u >/tmp/analyse$$/statWords.vars
+#awk 'NR == FNR {count[$0]++; next}; count[$0] <= '"${triggerValue}" /tmp/analyse$$/statWords /tmp/analyse$$/statWords |sort -u >/tmp/analyse$$/statWords.vars
 
 # replace vars
 cp -a /tmp/analyse$$/files /tmp/analyse$$/files.cache
