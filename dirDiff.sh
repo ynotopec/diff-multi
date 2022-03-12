@@ -1,6 +1,7 @@
 #!/bin/sh
 # diff "<directory>"
 # APA 20180712
+#pacheco at infocepo.com
 
 [ $# -lt 1 ] &&exit
 
@@ -37,7 +38,7 @@ triggerValue=$(($(ls -1d /tmp/analyse$$/files/* |wc -l) / 2))
 
 # replace vars
 cp -a /tmp/analyse$$/files /tmp/analyse$$/files.cache
-cat /tmp/analyse$$/statWords.vars |while read lineMy ;do sed -i "s#\b${lineMy}\b#\${varMy}#g" /tmp/analyse$$/files.cache/* ;done
+cat /tmp/analyse$$/statWords.vars |while read lineMy ;do sed -i "s#\b${lineMy}\b#\${varMy}#g" /tmp/analyse$$/files.cache/* ;done 2>/dev/null
 
 # comm = /tmp/analyse$$/comm
 ls -1d /tmp/analyse$$/files.cache/* |while read fileName ;do
