@@ -1,7 +1,7 @@
 #!/bin/sh
 # diff "<directory>"
 # APA 20180712
-#pacheco at infocepo.com
+#ynotopec at gmail.com
 
 [ $# -lt 1 ] &&exit
 
