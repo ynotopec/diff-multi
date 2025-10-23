@@ -25,3 +25,18 @@ cleaned up automatically when the script exits. Each diff file contains three se
 You can inspect the diff files while the script is running by browsing the temporary
 `diff` directory printed in the script's output. Copy any files you want to keep before
 it finishes so they are not removed by the cleanup step.
+
+## Diagram
+
+```mermaid
+flowchart TD
+    A[Input directory] --> B{Validate path}
+    B -- invalid --> C[Print error message]
+    B -- valid --> D[Copy files to temp workspace]
+    D --> E[Normalise file contents]
+    E --> F[Generate side-by-side diffs]
+    F --> G[Highlight unique lines]
+    G --> H[Write diff files in temp dir]
+    H --> I[Inspect and optionally copy results]
+    I --> J[Cleanup temporary files]
+```
