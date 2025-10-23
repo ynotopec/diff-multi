@@ -71,8 +71,9 @@ find "$files_dir" -type f -print \
 file_count=$(find "$files_dir" -type f | wc -l | tr -d '[:space:]')
 trigger_value=$(( file_count / 2 ))
 
-# Identify tokens that appear in at most half of the files.
-awk -v limit="$trigger_value" '{ count[$0]++ } END { for (word in count) if (count[word] <= limit) print word }' \
+# Identify tokens that appear in more than half of the files and mask them so
+# the diffs focus on the outliers rather than the shared structure.
+awk -v limit="$trigger_value" '{ count[$0]++ } END { for (word in count) if (count[word] > limit) print word }' \
   "$stat_words" | sort -u >"$stat_words_vars"
 
 # Copy the files so we can mask the less frequent tokens.
