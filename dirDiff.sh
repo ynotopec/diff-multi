@@ -1,67 +1,111 @@
 #!/bin/sh
 # diff "<directory>"
 # APA 20180712
-#ynotopec at gmail.com
+# ynotopec at gmail.com
 
-[ $# -lt 1 ] &&exit
+set -eu
 
-# initialisation des variables
-baseDir="$(realpath "$(dirname $0)"/..)"
-cacheFile=/tmp/"$(basename $0)"$$
+usage() {
+  cat <<'USAGE' >&2
+Usage: dirDiff.sh <directory>
 
-########### commun algo
-rm -rf /tmp/analyse*
-filesList="$(ls -1d $1/*)"
+Generate simplified diffs for every file contained in <directory>.
+The script extracts shared lines across files and highlights only the
+lines that are unique to each file.
+USAGE
+}
 
-# work dirs
-mkdir -p /tmp/analyse$$/files /tmp/analyse$$/diff
+if [ "$#" -ne 1 ]; then
+  usage
+  exit 1
+fi
 
-# cp files and unzip
-echo "${filesList}" |while read fileName ;do
-  cp -p "${fileName}" /tmp/analyse$$/files/.
-done
-gunzip /tmp/analyse$$/files/*.gz
-filesList="$(ls -1d /tmp/analyse$$/files/*)"
+input_dir=$1
+if [ ! -d "$input_dir" ]; then
+  printf 'Error: "%s" is not a directory.\n' "$input_dir" >&2
+  usage
+  exit 1
+fi
 
-## find words
-# stat words
-echo "${filesList}" |while read fileName ;do
-  cat "${fileName}" \
-    |tr -c "[:alnum:]_" "[\n*]" |grep -v "^\s*$" |sort -u
-done \
-  >/tmp/analyse$$/statWords
+work_root=$(mktemp -d -t dirDiff.XXXXXX)
+cleanup() {
+  rm -rf "$work_root"
+}
+trap cleanup EXIT HUP INT TERM
 
-triggerValue=$(($(ls -1d /tmp/analyse$$/files/* |wc -l) / 2))
+files_dir="$work_root/files"
+cache_dir="$work_root/files.cache"
+diff_dir="$work_root/diff"
+comm_file="$work_root/comm"
+stat_words="$work_root/statWords"
+stat_words_vars="$work_root/statWords.vars"
+tmp_file="$work_root/tmp"
 
-# keep vars words
-#awk 'NR == FNR {count[$0]++; next}; count[$0] <= '"${triggerValue}" /tmp/analyse$$/statWords /tmp/analyse$$/statWords |sort -u >/tmp/analyse$$/statWords.vars
+mkdir -p "$files_dir" "$cache_dir" "$diff_dir"
 
-# replace vars
-cp -a /tmp/analyse$$/files /tmp/analyse$$/files.cache
-cat /tmp/analyse$$/statWords.vars |while read lineMy ;do sed -i "s#\b${lineMy}\b#\${varMy}#g" /tmp/analyse$$/files.cache/* ;done 2>/dev/null
+# Copy files into the working directory.
+find "$input_dir" -mindepth 1 -maxdepth 1 -type f -print \
+  | while IFS= read -r file_name; do
+      cp -p "$file_name" "$files_dir/"
+    done
 
-# comm = /tmp/analyse$$/comm
-ls -1d /tmp/analyse$$/files.cache/* |while read fileName ;do
-  cat "${fileName}" \
-    |awk '!seen[$0]++'
-done \
-  >/tmp/analyse$$/comm
+if ! find "$files_dir" -mindepth 1 -maxdepth 1 -type f | read -r _; then
+  printf 'Error: "%s" does not contain any files to diff.\n' "$input_dir" >&2
+  exit 1
+fi
 
-awk 'NR == FNR {count[$0]++; next}; count[$0] > '"${triggerValue}" /tmp/analyse$$/comm /tmp/analyse$$/comm \
-  |awk '!seen[$0]++' >/tmp/analyse$$/comm2
-mv -f /tmp/analyse$$/comm2 /tmp/analyse$$/comm
+# Decompress gzip archives so they can be diffed like regular files.
+find "$files_dir" -type f -name '*.gz' -print \
+  | while IFS= read -r gz_file; do
+      gunzip -f "$gz_file"
+    done
 
-# diff = /tmp/analyse$$/diff/
-ls -1d /tmp/analyse$$/files.cache/* |while read fileName ;do
-  ( echo "== $(basename "${fileName}") =="
-    cat "${fileName}"
-    echo "=== missing ==="
-    cat /tmp/analyse$$/comm
-  ) >/tmp/analyse$$/tmp
+# Build the list of unique tokens per file.
+find "$files_dir" -type f -print \
+  | while IFS= read -r file_name; do
+      tr -c '[:alnum:]_' '[\n*]' <"$file_name" \
+        | grep -v '^\s*$' \
+        | sort -u
+    done >"$stat_words"
 
-  awk 'NR == FNR {count[$0]++; next}; count[$0] == 1' /tmp/analyse$$/tmp /tmp/analyse$$/tmp \
-    |tee /tmp/analyse$$/diff/"$(basename "${fileName}")"
-done
+file_count=$(find "$files_dir" -type f | wc -l | tr -d '[:space:]')
+trigger_value=$(( file_count / 2 ))
 
-# libère cache
-rm -f /tmp/"$(basename $0)"$$*
+# Identify tokens that appear in at most half of the files.
+awk -v limit="$trigger_value" '{ count[$0]++ } END { for (word in count) if (count[word] <= limit) print word }' \
+  "$stat_words" | sort -u >"$stat_words_vars"
+
+# Copy the files so we can mask the less frequent tokens.
+cp -a "$files_dir/." "$cache_dir/"
+
+if [ -s "$stat_words_vars" ]; then
+  while IFS= read -r token; do
+    sed -i "s#\\b${token}\\b#\\$""{varMy}#g" "$cache_dir"/*
+  done <"$stat_words_vars"
+fi
+
+# Collect the common lines across all files.
+find "$cache_dir" -type f -print \
+  | while IFS= read -r file_name; do
+      awk '!seen[$0]++' "$file_name"
+    done >"$comm_file"
+
+awk -v limit="$trigger_value" 'NR == FNR { count[$0]++; next } count[$0] > limit' \
+  "$comm_file" "$comm_file" | awk '!seen[$0]++' >"${comm_file}.filtered"
+mv "${comm_file}.filtered" "$comm_file"
+
+# Build a diff for each file, highlighting only the unique lines.
+find "$cache_dir" -type f -print \
+  | while IFS= read -r file_name; do
+      {
+        printf '== %s ==\n' "$(basename "$file_name")"
+        cat "$file_name"
+        printf '=== missing ===\n'
+        cat "$comm_file"
+      } >"$tmp_file"
+
+      awk 'NR == FNR { count[$0]++; next } count[$0] == 1' "$tmp_file" "$tmp_file" \
+        | tee "$diff_dir/$(basename "$file_name")"
+    done
+
+# The diff files are available in "$diff_dir" when the script exits.
