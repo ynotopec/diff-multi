@@ -36,40 +36,54 @@ trap cleanup EXIT HUP INT TERM
 files_dir="$work_root/files"
 cache_dir="$work_root/files.cache"
 diff_dir="$work_root/diff"
+files_list="$work_root/files.list"
+cache_list="$work_root/cache.list"
 comm_file="$work_root/comm"
 stat_words="$work_root/statWords"
 stat_words_vars="$work_root/statWords.vars"
-tmp_file="$work_root/tmp"
 
 mkdir -p "$files_dir" "$cache_dir" "$diff_dir"
 
-# Copy files into the working directory.
-find "$input_dir" -mindepth 1 -maxdepth 1 -type f -print \
-  | while IFS= read -r file_name; do
-      cp -p "$file_name" "$files_dir/"
-    done
+# Copy files into the working directory, inflating gzip archives on the fly so
+# each file is processed only once.
+found_file=0
+for file_path in "$input_dir"/*; do
+  [ -f "$file_path" ] || continue
+  found_file=1
+  base_name=$(basename "$file_path")
+  if [ "${base_name##*.}" = "gz" ]; then
+    output_name="$files_dir/${base_name%.gz}"
+    gunzip -c "$file_path" >"$output_name"
+    touch -r "$file_path" "$output_name" 2>/dev/null || true
+  else
+    cp -p "$file_path" "$files_dir/"
+  fi
+done
 
-if ! find "$files_dir" -mindepth 1 -maxdepth 1 -type f | read -r _; then
+if [ "$found_file" -eq 0 ]; then
   printf 'Error: "%s" does not contain any files to diff.\n' "$input_dir" >&2
   exit 1
 fi
 
-# Decompress gzip archives so they can be diffed like regular files.
-find "$files_dir" -type f -name '*.gz' -print \
-  | while IFS= read -r gz_file; do
-      gunzip -f "$gz_file"
-    done
+# Snapshot the list of working files so subsequent stages can reuse it without
+# rescanning the directory tree.
+find "$files_dir" -type f >"$files_list"
+
+if [ ! -s "$files_list" ]; then
+  printf 'Error: "%s" does not contain any files to diff.\n' "$input_dir" >&2
+  exit 1
+fi
+
+file_count=$(wc -l <"$files_list" | tr -d '[:space:]')
+trigger_value=$(( file_count / 2 ))
 
 # Build the list of unique tokens per file.
-find "$files_dir" -type f -print \
-  | while IFS= read -r file_name; do
-      tr -c '[:alnum:]_' '[\n*]' <"$file_name" \
-        | grep -v '^\s*$' \
-        | sort -u
-    done >"$stat_words"
-
-file_count=$(find "$files_dir" -type f | wc -l | tr -d '[:space:]')
-trigger_value=$(( file_count / 2 ))
+: >"$stat_words"
+while IFS= read -r file_name; do
+  tr -c '[:alnum:]_' '[\n*]' <"$file_name" \
+    | grep -v '^\s*$' \
+    | sort -u >>"$stat_words"
+done <"$files_list"
 
 # Identify tokens that appear in more than half of the files and mask them so
 # the diffs focus on the outliers rather than the shared structure.
@@ -78,35 +92,46 @@ awk -v limit="$trigger_value" '{ count[$0]++ } END { for (word in count) if (cou
 
 # Copy the files so we can mask the less frequent tokens.
 cp -a "$files_dir/." "$cache_dir/"
+find "$cache_dir" -type f >"$cache_list"
 
 if [ -s "$stat_words_vars" ]; then
-  while IFS= read -r token; do
-    sed -i "s#\\b${token}\\b#\\$""{varMy}#g" "$cache_dir"/*
-  done <"$stat_words_vars"
+  mask_pattern=$(paste -sd '|' "$stat_words_vars")
+  while IFS= read -r file_name; do
+    perl -0pi -e 's/\b(?:'"$mask_pattern"')\b/\${varMy}/g' "$file_name"
+  done <"$cache_list"
 fi
 
 # Collect the common lines across all files.
-find "$cache_dir" -type f -print \
-  | while IFS= read -r file_name; do
-      awk '!seen[$0]++' "$file_name"
-    done >"$comm_file"
+tr '\n' '\0' <"$cache_list"   | xargs -0 awk -v limit="$trigger_value" '
+      FNR == 1 { delete seen }
+      {
+        if (!seen[$0]++) {
+          count[$0]++
+        }
+      }
+      END {
+        for (line in count) {
+          if (count[line] > limit) {
+            print line
+          }
+        }
+      }
+    ' >"$comm_file"
 
-awk -v limit="$trigger_value" 'NR == FNR { count[$0]++; next } count[$0] > limit' \
-  "$comm_file" "$comm_file" | awk '!seen[$0]++' >"${comm_file}.filtered"
-mv "${comm_file}.filtered" "$comm_file"
+LC_ALL=C sort -u "$comm_file" -o "$comm_file"
 
 # Build a diff for each file, highlighting only the unique lines.
-find "$cache_dir" -type f -print \
-  | while IFS= read -r file_name; do
-      {
-        printf '== %s ==\n' "$(basename "$file_name")"
-        cat "$file_name"
-        printf '=== missing ===\n'
-        cat "$comm_file"
-      } >"$tmp_file"
-
-      awk 'NR == FNR { count[$0]++; next } count[$0] == 1' "$tmp_file" "$tmp_file" \
-        | tee "$diff_dir/$(basename "$file_name")"
-    done
+while IFS= read -r file_name; do
+  base_name=$(basename "$file_name")
+  {
+    printf '== %s ==\n' "$base_name"
+    awk 'NR == FNR { common[$0] = 1; next } !common[$0] && !seen[$0]++' \
+      "$comm_file" "$file_name"
+    printf '=== missing ===\n'
+    awk 'NR == FNR { present[$0] = 1; next } !present[$0] && !seen[$0]++' \
+      "$file_name" "$comm_file"
+  } >"$diff_dir/$base_name"
+  touch -r "$file_name" "$diff_dir/$base_name" 2>/dev/null || true
+done <"$cache_list"
 
 # The diff files are available in "$diff_dir" when the script exits.
